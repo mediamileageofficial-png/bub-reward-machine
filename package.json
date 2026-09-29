@@ -1,0 +1,57 @@
+{
+  "name": "bub-reward-machine",
+  "version": "1.0.0",
+  "description": "BUB Reward Machine V1 — BUB Expo 2026",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint .",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "check": "npm run typecheck && npm run lint && npm run test",
+    "build:lambda": "node infra/lambda/build.mjs",
+    "seed:dynamo": "tsx scripts/seed-dynamo.ts",
+    "create:user": "tsx scripts/create-dashboard-user.ts",
+    "postbuild": "node scripts/check-client-bundle.mjs"
+  },
+  "license": "UNLICENSED",
+  "dependencies": {
+    "@aws-sdk/client-dynamodb": "^3.1141.0",
+    "@aws-sdk/client-s3": "^3.1141.0",
+    "@aws-sdk/lib-dynamodb": "^3.1141.0",
+    "@aws-sdk/s3-presigned-post": "^3.1141.0",
+    "@aws-sdk/s3-request-presigner": "^3.1141.0",
+    "@fontsource/anton": "^5.3.0",
+    "@fontsource/archivo": "^5.3.0",
+    "aws-jwt-verify": "^5.2.1",
+    "libphonenumber-js": "^1.13.14",
+    "next": "^16.3.6",
+    "qrcode": "^1.5.4",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0",
+    "zod": "^4.6.5"
+  },
+  "devDependencies": {
+    "@aws-sdk/client-cognito-identity-provider": "^3.1141.0",
+    "@tailwindcss/postcss": "^4.3.3",
+    "@types/aws-lambda": "^8.10.163",
+    "@types/node": "^26.6.3",
+    "@types/qrcode": "^1.5.6",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "esbuild": "^0.28.2",
+    "eslint": "^9.39.5",
+    "eslint-config-next": "^16.3.6",
+    "postcss": "^8.5.28",
+    "tailwindcss": "^4.3.3",
+    "tsx": "^4.23.15",
+    "typescript": "^6.0.3",
+    "vitest": "^5.0.2"
+  },
+  "private": true,
+  "engines": {
+    "node": ">=20"
+  }
+}

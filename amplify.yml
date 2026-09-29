@@ -1,0 +1,24 @@
+# AWS Amplify Hosting build spec (Next.js SSR, Node 22).
+# Configure environment variables in the Amplify console (see README → Production deployment).
+version: 1
+frontend:
+  phases:
+    preBuild:
+      commands:
+        - nvm use 22 || true
+        - npm ci
+    build:
+      commands:
+        # Expose server-side variables to the Next.js runtime (Amplify only injects them at build time).
+        - env | grep -E '^(BUB_AWS_|DYNAMODB_|S3_|ASSETS_|COGNITO_|WHATSAPP_|MSG91_|OTP_|SESSION_SECRET|APP_BASE_URL|CAMPAIGN_ID|DEFAULT_PHONE_COUNTRY|REWARD_HOLD_MINUTES|SPONSOR_SELF_REDEMPTION|TRUST_PROXY_HEADERS|API_PROXY_URL|SEED_DEMO_DATA|ALLOW_MOCK_LOGIN|LOG_LEVEL)' >> .env.production || true
+        - npm run typecheck
+        - npm test
+        - npm run build
+  artifacts:
+    baseDirectory: .next
+    files:
+      - "**/*"
+  cache:
+    paths:
+      - node_modules/**/*
+      - .next/cache/**/*

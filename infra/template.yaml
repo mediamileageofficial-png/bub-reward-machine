@@ -1,0 +1,321 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  BUB Reward Machine V1 — DynamoDB, S3 (assets + temp), Cognito (admin/sponsor),
+  API Gateway HTTP API + Lambda (shared route table), hold-expiry sweeper.
+  Frontend is hosted on AWS Amplify (see amplify.yml + README).
+
+Parameters:
+  Stage:
+    Type: String
+    Default: prod
+    AllowedValues: [dev, staging, prod]
+  AppBaseUrl:
+    Type: String
+    Description: Public URL of the Amplify site, e.g. https://play.bubexpo.in (no trailing slash)
+  CognitoDomainPrefix:
+    Type: String
+    Description: Globally-unique prefix for the Cognito Hosted UI domain, e.g. bub-expo-2026-admin
+  SessionSecretArn:
+    Type: String
+    Description: ARN of a Secrets Manager secret with key "session_secret" (64+ random chars)
+  WhatsAppSecretArn:
+    Type: String
+    Default: ""
+    Description: ARN of a Secrets Manager secret with the WhatsApp provider keys (msg91 auth_key + integrated_number, or meta access_token + phone_number_id). Leave empty while in WhatsApp mock mode
+  WhatsAppMockMode:
+    Type: String
+    Default: "true"
+    AllowedValues: ["true", "false"]
+  WhatsAppApiBaseUrl:
+    Type: String
+    Default: https://graph.facebook.com/v21.0
+  CampaignStatus:
+    Type: String
+    Default: live
+    AllowedValues: [live, paused, ended]
+  WhatsAppProvider:
+    Type: String
+    Default: msg91
+    AllowedValues: [msg91, meta_cloud]
+  EventStartDate:
+    Type: String
+    Default: "2026-10-15"
+  EventEndDate:
+    Type: String
+    Default: "2026-10-17"
+
+Conditions:
+  HasWhatsAppSecret: !Not [!Equals [!Ref WhatsAppSecretArn, ""]]
+  IsProd: !Equals [!Ref Stage, prod]
+  UseMsg91Secret: !And [!Condition HasWhatsAppSecret, !Equals [!Ref WhatsAppProvider, msg91]]
+  UseMetaSecret: !And [!Condition HasWhatsAppSecret, !Equals [!Ref WhatsAppProvider, meta_cloud]]
+
+Globals:
+  Function:
+    Runtime: nodejs22.x
+    Architectures: [arm64]
+    MemorySize: 512
+    Timeout: 15
+    Tracing: Active
+    Environment:
+      Variables:
+        NODE_ENV: production
+        NODE_OPTIONS: --enable-source-maps
+        AWS_MOCK_MODE: "false"
+        WHATSAPP_MOCK_MODE: !Ref WhatsAppMockMode
+        APP_BASE_URL: !Ref AppBaseUrl
+        CAMPAIGN_ID: bub-expo-2026
+        DYNAMODB_TABLE_NAME: !Ref Table
+        S3_ASSETS_BUCKET: !Ref AssetsBucket
+        S3_TEMP_BUCKET: !Ref TempBucket
+        ASSETS_PUBLIC_BASE_URL: !Sub "https://${AssetsCdn.DomainName}"
+        COGNITO_USER_POOL_ID: !Ref UserPool
+        COGNITO_CLIENT_ID: !Ref UserPoolClient
+        COGNITO_DOMAIN: !Sub "https://${CognitoDomainPrefix}.auth.${AWS::Region}.amazoncognito.com"
+        SESSION_SECRET: !Sub "{{resolve:secretsmanager:${SessionSecretArn}:SecretString:session_secret}}"
+        WHATSAPP_API_BASE_URL: !Ref WhatsAppApiBaseUrl
+        # Secret keys: msg91 → auth_key, integrated_number · meta_cloud → access_token, phone_number_id
+        MSG91_AUTH_KEY: !If [UseMsg91Secret, !Sub "{{resolve:secretsmanager:${WhatsAppSecretArn}:SecretString:auth_key}}", ""]
+        MSG91_INTEGRATED_NUMBER: !If [UseMsg91Secret, !Sub "{{resolve:secretsmanager:${WhatsAppSecretArn}:SecretString:integrated_number}}", ""]
+        WHATSAPP_ACCESS_TOKEN: !If [UseMetaSecret, !Sub "{{resolve:secretsmanager:${WhatsAppSecretArn}:SecretString:access_token}}", ""]
+        WHATSAPP_PHONE_NUMBER_ID: !If [UseMetaSecret, !Sub "{{resolve:secretsmanager:${WhatsAppSecretArn}:SecretString:phone_number_id}}", ""]
+        # Event facts come from the central config (src/config/bub.ts); keep these in sync with Amplify.
+        NEXT_PUBLIC_EVENT_TIMEZONE: Asia/Kolkata
+        NEXT_PUBLIC_EVENT_UTC_OFFSET_MINUTES: "330"
+        NEXT_PUBLIC_EVENT_START_DATE: !Ref EventStartDate
+        NEXT_PUBLIC_EVENT_END_DATE: !Ref EventEndDate
+        NEXT_PUBLIC_CAMPAIGN_STATUS: !Ref CampaignStatus
+        SEED_DEMO_DATA: "false"
+        WHATSAPP_PROVIDER: !Ref WhatsAppProvider
+        WHATSAPP_ALLOWED_COUNTRIES: IN
+        TRUST_PROXY_HEADERS: "true"
+        LOG_LEVEL: info
+
+Resources:
+  # ---------------------------------------------------------------- DynamoDB
+  Table:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      TableName: !Sub "bub-reward-machine-${Stage}"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - { AttributeName: PK, AttributeType: S }
+        - { AttributeName: SK, AttributeType: S }
+        - { AttributeName: GSI1PK, AttributeType: S }
+        - { AttributeName: GSI1SK, AttributeType: S }
+        - { AttributeName: GSI2PK, AttributeType: S }
+        - { AttributeName: GSI2SK, AttributeType: S }
+      KeySchema:
+        - { AttributeName: PK, KeyType: HASH }
+        - { AttributeName: SK, KeyType: RANGE }
+      GlobalSecondaryIndexes:
+        - IndexName: GSI1
+          KeySchema:
+            - { AttributeName: GSI1PK, KeyType: HASH }
+            - { AttributeName: GSI1SK, KeyType: RANGE }
+          Projection: { ProjectionType: ALL }
+        - IndexName: GSI2
+          KeySchema:
+            - { AttributeName: GSI2PK, KeyType: HASH }
+            - { AttributeName: GSI2SK, KeyType: RANGE }
+          Projection: { ProjectionType: ALL }
+      TimeToLiveSpecification: { AttributeName: ttl, Enabled: true }
+      PointInTimeRecoverySpecification: { PointInTimeRecoveryEnabled: true }
+      SSESpecification: { SSEEnabled: true }
+      DeletionProtectionEnabled: !If [IsProd, true, false]
+
+  # ---------------------------------------------------------------- S3
+  # Brand assets only (sponsor logos, story template artwork). Private bucket served through CloudFront.
+  AssetsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      PublicAccessBlockConfiguration: { BlockPublicAcls: true, BlockPublicPolicy: true, IgnorePublicAcls: true, RestrictPublicBuckets: true }
+      BucketEncryption:
+        ServerSideEncryptionConfiguration: [{ ServerSideEncryptionByDefault: { SSEAlgorithm: AES256 } }]
+      CorsConfiguration:
+        CorsRules:
+          - AllowedOrigins: [!Ref AppBaseUrl]
+            AllowedMethods: [GET, POST]
+            AllowedHeaders: ["*"]
+            MaxAge: 3600
+
+  AssetsOac:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig:
+        Name: !Sub "bub-assets-${Stage}"
+        OriginAccessControlOriginType: s3
+        SigningBehavior: always
+        SigningProtocol: sigv4
+
+  AssetsCdn:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        Comment: BUB brand assets
+        Origins:
+          - Id: assets
+            DomainName: !GetAtt AssetsBucket.RegionalDomainName
+            S3OriginConfig: { OriginAccessIdentity: "" }
+            OriginAccessControlId: !GetAtt AssetsOac.Id
+        DefaultCacheBehavior:
+          TargetOriginId: assets
+          ViewerProtocolPolicy: redirect-to-https
+          CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6 # CachingOptimized
+          OriginRequestPolicyId: 88a5eaf4-2fd4-4709-b370-b4c650ea3fcf # CORS-S3Origin (canvas needs CORS headers)
+          ResponseHeadersPolicyId: 5cc3b908-e619-4b99-88e5-2cf7f45965bd # CORS-With-Preflight
+        HttpVersion: http2and3
+
+  AssetsBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref AssetsBucket
+      PolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal: { Service: cloudfront.amazonaws.com }
+            Action: s3:GetObject
+            Resource: !Sub "${AssetsBucket.Arn}/*"
+            Condition:
+              StringEquals:
+                AWS:SourceArn: !Sub "arn:aws:cloudfront::${AWS::AccountId}:distribution/${AssetsCdn}"
+
+  # Private, auto-expiring. V1 renders stories on-device, so no selfie is ever uploaded;
+  # this bucket exists so any future server-side processing has a 1-day retention by default.
+  TempBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      PublicAccessBlockConfiguration: { BlockPublicAcls: true, BlockPublicPolicy: true, IgnorePublicAcls: true, RestrictPublicBuckets: true }
+      BucketEncryption:
+        ServerSideEncryptionConfiguration: [{ ServerSideEncryptionByDefault: { SSEAlgorithm: AES256 } }]
+      LifecycleConfiguration:
+        Rules:
+          - Id: expire-temp-uploads
+            Status: Enabled
+            ExpirationInDays: 1
+            AbortIncompleteMultipartUpload: { DaysAfterInitiation: 1 }
+
+  # ---------------------------------------------------------------- Cognito
+  UserPool:
+    Type: AWS::Cognito::UserPool
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      UserPoolName: !Sub "bub-dashboards-${Stage}"
+      UsernameAttributes: [email]
+      AutoVerifiedAttributes: [email]
+      AdminCreateUserConfig: { AllowAdminCreateUserOnly: true }
+      MfaConfiguration: OPTIONAL
+      EnabledMfas: [SOFTWARE_TOKEN_MFA]
+      Policies:
+        PasswordPolicy: { MinimumLength: 12, RequireLowercase: true, RequireUppercase: true, RequireNumbers: true, RequireSymbols: false }
+      Schema:
+        - { Name: email, AttributeDataType: String, Required: true, Mutable: true }
+        - { Name: sponsor_id, AttributeDataType: String, Mutable: true }
+      AccountRecoverySetting:
+        RecoveryMechanisms: [{ Name: verified_email, Priority: 1 }]
+
+  AdminGroup:
+    Type: AWS::Cognito::UserPoolGroup
+    Properties: { GroupName: ADMIN, UserPoolId: !Ref UserPool, Description: BUB / Aurix administrators }
+
+  SponsorGroup:
+    Type: AWS::Cognito::UserPoolGroup
+    Properties: { GroupName: SPONSOR, UserPoolId: !Ref UserPool, Description: Sponsor coupon dashboard }
+
+  UserPoolDomain:
+    Type: AWS::Cognito::UserPoolDomain
+    Properties: { Domain: !Ref CognitoDomainPrefix, UserPoolId: !Ref UserPool }
+
+  UserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      UserPoolId: !Ref UserPool
+      ClientName: bub-web
+      GenerateSecret: false
+      AllowedOAuthFlowsUserPoolClient: true
+      AllowedOAuthFlows: [code]
+      AllowedOAuthScopes: [openid, email, profile]
+      SupportedIdentityProviders: [COGNITO]
+      CallbackURLs: [!Sub "${AppBaseUrl}/api/auth/callback"]
+      LogoutURLs: [!Sub "${AppBaseUrl}/"]
+      IdTokenValidity: 8
+      AccessTokenValidity: 8
+      RefreshTokenValidity: 7
+      TokenValidityUnits: { IdToken: hours, AccessToken: hours, RefreshToken: days }
+      PreventUserExistenceErrors: ENABLED
+      ReadAttributes: [email, custom:sponsor_id]
+      WriteAttributes: [email]
+
+  # ---------------------------------------------------------------- API
+  HttpApi:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      StageName: !Ref Stage
+      DefaultRouteSettings:
+        ThrottlingBurstLimit: 400
+        ThrottlingRateLimit: 200
+      AccessLogSettings:
+        DestinationArn: !GetAtt ApiLogs.Arn
+        Format: '{"requestId":"$context.requestId","ip":"$context.identity.sourceIp","route":"$context.routeKey","status":"$context.status","latency":"$context.responseLatency"}'
+
+  ApiLogs:
+    Type: AWS::Logs::LogGroup
+    Properties: { RetentionInDays: 30 }
+
+  ApiFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: lambda/dist/api/
+      Handler: index.handler
+      ReservedConcurrentExecutions: 200
+      Policies:
+        - DynamoDBCrudPolicy: { TableName: !Ref Table }
+        - Statement:
+            - Effect: Allow
+              Action: [s3:PutObject]
+              Resource: [!Sub "${AssetsBucket.Arn}/logos/*", !Sub "${AssetsBucket.Arn}/templates/*"]
+      Events:
+        Api:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /api/{proxy+}
+            Method: ANY
+
+  SweeperFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: lambda/dist/sweeper/
+      Handler: index.handler
+      Timeout: 120
+      Policies:
+        - DynamoDBCrudPolicy: { TableName: !Ref Table }
+      Events:
+        Every5Min:
+          Type: ScheduleV2
+          Properties:
+            ScheduleExpression: rate(5 minutes)
+
+Outputs:
+  ApiUrl:
+    Description: Set as API_PROXY_URL in Amplify so /api/* is served by this API
+    Value: !Sub "https://${HttpApi}.execute-api.${AWS::Region}.amazonaws.com/${Stage}"
+  TableName:
+    Value: !Ref Table
+  AssetsBucketName:
+    Value: !Ref AssetsBucket
+  AssetsPublicBaseUrl:
+    Value: !Sub "https://${AssetsCdn.DomainName}"
+  TempBucketName:
+    Value: !Ref TempBucket
+  UserPoolId:
+    Value: !Ref UserPool
+  UserPoolClientId:
+    Value: !Ref UserPoolClient
+  CognitoDomain:
+    Value: !Sub "https://${CognitoDomainPrefix}.auth.${AWS::Region}.amazoncognito.com"
