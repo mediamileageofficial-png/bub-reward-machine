@@ -34,7 +34,7 @@ export async function createAssetUpload(ctx: AppContext, input: { content_type?:
     return { mode: "inline" as const, max_bytes: INLINE_ASSET_MAX_BYTES };
   }
   if (size > ASSET_MAX_BYTES) throw badRequest("FILE_TOO_LARGE", "Images must be under 5 MB.");
-  client ??= new S3Client({ region: ctx.cfg.aws.region });
+  client ??= new S3Client({ region: ctx.cfg.aws.region, credentials: ctx.cfg.aws.credentials });
   const key = `${kind}/${newId("ast")}.${ext}`;
   const post = await createPresignedPost(client, {
     Bucket: ctx.cfg.aws.assetsBucket,

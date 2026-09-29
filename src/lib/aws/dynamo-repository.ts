@@ -78,6 +78,7 @@ export interface DynamoRepositoryOptions {
   region: string;
   campaignId: string;
   endpoint?: string; // e.g. http://localhost:8000 for DynamoDB Local
+  credentials?: { accessKeyId: string; secretAccessKey: string };
   client?: DynamoDBDocumentClient;
 }
 
@@ -91,7 +92,7 @@ export class DynamoRepository implements Repository {
     this.statsKey = { PK: `CAMPAIGN#${opts.campaignId}`, SK: "STATS" };
     this.doc =
       opts.client ??
-      DynamoDBDocumentClient.from(new DynamoDBClient({ region: opts.region, endpoint: opts.endpoint }), {
+      DynamoDBDocumentClient.from(new DynamoDBClient({ region: opts.region, endpoint: opts.endpoint, credentials: opts.credentials }), {
         marshallOptions: { removeUndefinedValues: true, convertClassInstanceToMap: false },
       });
   }

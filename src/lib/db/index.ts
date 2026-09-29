@@ -27,6 +27,7 @@ export function getRepository(): Promise<Repository> {
         region: cfg.aws.region,
         campaignId: cfg.campaignId,
         endpoint: process.env.DYNAMODB_ENDPOINT || undefined,
+        credentials: cfg.aws.credentials,
       });
     })();
   }

@@ -27,6 +27,12 @@ function int(v: string | undefined, fallback: number): number {
   return Number.isFinite(n) ? n : fallback;
 }
 
+function awsCredentials(): { accessKeyId: string; secretAccessKey: string } | undefined {
+  const accessKeyId = read("BUB_AWS_ACCESS_KEY_ID");
+  const secretAccessKey = read("BUB_AWS_SECRET_ACCESS_KEY");
+  return accessKeyId && secretAccessKey ? { accessKeyId, secretAccessKey } : undefined;
+}
+
 export function getServerConfig() {
   const awsMock = bool(read("AWS_MOCK_MODE", "BUB_AWS_MOCK_MODE"), process.env.NODE_ENV !== "production");
   const secret = read("SESSION_SECRET");
@@ -50,6 +56,8 @@ export function getServerConfig() {
       assetsBucket: read("S3_ASSETS_BUCKET") ?? "",
       tempBucket: read("S3_TEMP_BUCKET") ?? "",
       assetsPublicBaseUrl: (read("ASSETS_PUBLIC_BASE_URL") ?? "").replace(/\/$/, ""),
+      // Explicit keys for hosts that reserve AWS_* (Vercel, Amplify). Unset = default credential chain.
+      credentials: awsCredentials(),
     },
 
     cognito: {
